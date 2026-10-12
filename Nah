@@ -1,31 +1,58 @@
---[[
-    FluentPro UI System - Updated to Official FluentPro Example Architecture
-    Repository Reference: https://github.com/StyearX/Fluent-modded
-    
-    Tabs:
-      1. Villains         (workspace.MobSpawnGroup -> Spawn.ChestRef filter, Multi-select, Hover/Lie down)
-      2. Mobs near player (workspace.Mob -> Deduplicated, Multi-select, Hover/Lie down)
-      3. Weapons          (workspace.NpcWeapon -> Single-select, Teleport button)
-      4. island           (workspace.island -> Single-select, Teleport button)
-      5. Audio & Code     (FluentPro Media & Code Showcase)
-      6. Settings         (InterfaceManager & SaveManager integration)
---]]
+--!unstack
+--!stacking
+local Fluent = loadstring(game:HttpGet("https://github.com/StyearX/Fluent-Modded/releases/download/1.6.0/main.lua"))()
 
--- << 1. SERVICES & SYSTEM CHECKS >>
-local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
+Workspace = game:GetService("Workspace")
+RunService = game:GetService("RunService")
+Players = game:GetService("Players")
+Lighting = game:GetService("Lighting")
+StarterGui = game:GetService("StarterGui")
+ReplicatedStorage = game:GetService("ReplicatedStorage")
+Camera = Workspace.CurrentCamera
+LocalPlayer = Players.LocalPlayer
+UserInputService = game:GetService("UserInputService")
+TweenService = game:GetService("TweenService")
+PathfindingService = game:GetService("PathfindingService")
+CAS = game:GetService("ContextActionService")
+HttpService = game:GetService("HttpService")
+TeleportService = game:GetService("TeleportService")
+MarketplaceService = game:GetService("MarketplaceService")
+Stats = game:GetService("Stats")
+Sounds = game:GetService("SoundService")
 
-local LocalPlayer = Players.LocalPlayer
-local isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled and not UserInputService.KeyboardEnabled
+isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled and not UserInputService.KeyboardEnabled
 
--- << 2. LOAD FLUENTPRO & ADDONS >>
-local Fluent = loadstring(game:HttpGet("https://raw.githubusercontent.com/StyearX/Fluent-modded/main/main.lua"))()
-local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
-local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+function Notify(Title, Content, Status, Icon, Duration)
+    Fluent:Notify({
+        Title = Title,
+        Content = Content,
+        SubContent = Status,
+        Image = Icon,
+        Duration = Duration or 3,
+    })
+end
 
--- << 3. KINEMATIC & SCAN STATE >>
+local ExecutorName, ExecutorVersion = "Unknown", ""
+task.spawn(function()
+    pcall(function()
+        if identifyexecutor then
+            ExecutorName, ExecutorVersion = identifyexecutor()
+        elseif getexecutorname then
+            ExecutorName = getexecutorname()
+        end
+    end)
+    Notify(
+        "GoonWares",
+        string.format("Player: %s | Executor: %s %s", LocalPlayer.Name, ExecutorName or "Unknown", ExecutorVersion or ""),
+        "Info",
+        nil,
+        6
+    )
+end)
+
+-- ============================================================
+-- STATE & LOGIC ENGINE
+-- ============================================================
 local State = {
     VillainsSelected = {},
     VillainsActive = false,
@@ -39,9 +66,7 @@ local State = {
     SelectedIsland = nil,
 }
 
--- << 4. SCANNER UTILITIES >>
-
--- Villains: Items in workspace.MobSpawnGroup that have a "ChestRef" inside the "Spawn" area
+-- Villains: Items in workspace.MobSpawnGroup that contain ChestRef in Spawn
 local function scanVillains()
     local results = {}
     local spawnGroup = Workspace:FindFirstChild("MobSpawnGroup")
@@ -66,11 +91,11 @@ local function scanVillains()
             end
         end
     end
-    if #results == 0 then table.insert(results, "No Spawns With ChestRef") end
+    if #results == 0 then table.insert(results, "No Villains With ChestRef") end
     return results
 end
 
--- Mobs Near Player: workspace.Mob with name deduplication (maximum 1 of each name)
+-- Mobs near player: workspace.Mob deduplicated (max 1 of each name)
 local function scanMobsNear()
     local results = {}
     local seen = {}
@@ -100,7 +125,7 @@ local function scanWeapons()
     return results
 end
 
--- Islands: workspace.island
+-- Island: workspace.island
 local function scanIslands()
     local results = {}
     local folder = Workspace:FindFirstChild("island") or Workspace:FindFirstChild("Island") or Workspace:FindFirstChild("islands")
@@ -113,14 +138,15 @@ local function scanIslands()
     return results
 end
 
--- Helper to safely refresh Dropdown items
-local function refreshDropdown(dropdown, values)
-    if dropdown and type(dropdown.SetValues) == "function" then
+local function updateDropdown(dropdown, values)
+    if not dropdown then return end
+    if type(dropdown.SetValues) == "function" then
         dropdown:SetValues(values)
+    elseif type(dropdown.BuildDropdownList) == "function" then
+        dropdown.Values = values
+        dropdown:BuildDropdownList()
     end
 end
-
--- << 5. TARGET POSITIONING & KINEMATICS ENGINE >>
 
 local function getCharacterParts()
     local char = LocalPlayer.Character
@@ -152,7 +178,6 @@ local function getActiveVillainTarget()
         if isSelected == true then
             local group = spawnGroup:FindFirstChild(folderName)
             if group then
-                -- Target ChestRef (can be an ObjectValue, Model, or Part)
                 local chest = group:FindFirstChild("ChestRef", true)
                 if chest then
                     if chest:IsA("ObjectValue") and chest.Value and chest.Value:IsA("PVInstance") then
@@ -161,7 +186,6 @@ local function getActiveVillainTarget()
                         return chest
                     end
                 end
-                -- Target mob inside group if chest is not directly resolved
                 for _, child in ipairs(group:GetChildren()) do
                     if child:IsA("Model") and child.Name ~= "Spawn" then
                         return child
@@ -186,9 +210,9 @@ local function getActiveMobTarget(playerPos)
             if not hum or hum.Health > 0 then
                 local cf = getTargetCFrame(mob)
                 if cf then
-                    local dist = (cf.Position - playerPos).Magnitude
-                    if dist < shortestDist then
-                        shortestDist = dist
+                    local d = (cf.Position - playerPos).Magnitude
+                    if d < shortestDist then
+                        shortestDist = d
                         nearestMob = mob
                     end
                 end
@@ -198,7 +222,7 @@ local function getActiveMobTarget(playerPos)
     return nearestMob
 end
 
--- Positions player flat on top of the mob/chest, lying down and facing directly at it
+-- Kinematic lock: lying down belly-down facing the mob
 local function applyLyingHover(hrp, targetInstance, distance)
     local targetCF = getTargetCFrame(targetInstance)
     if not targetCF then return end
@@ -207,14 +231,13 @@ local function applyLyingHover(hrp, targetInstance, distance)
     local hoverPos = targetPos + Vector3.new(0, distance, 0)
     local targetLook = targetCF.LookVector
 
-    -- Calculate horizontal rotation
     local flatLook = Vector3.new(targetLook.X, 0, targetLook.Z)
     local baseRot = CFrame.new()
     if flatLook.Magnitude > 0.001 then
         baseRot = CFrame.lookAt(Vector3.zero, flatLook.Unit)
     end
 
-    -- Rotate -90 degrees on the X-axis so character lies prone (facing straight down toward the target)
+    -- -90 degrees pitch turns the character flat facing downwards
     local finalCF = CFrame.new(hoverPos) * baseRot * CFrame.Angles(-math.rad(90), 0, 0)
 
     hrp.CFrame = finalCF
@@ -222,7 +245,6 @@ local function applyLyingHover(hrp, targetInstance, distance)
     hrp.AssemblyAngularVelocity = Vector3.zero
 end
 
--- Kinematic loop connected to Heartbeat
 RunService.Heartbeat:Connect(function()
     local char, hrp = getCharacterParts()
     if not char or not hrp then return end
@@ -247,59 +269,461 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
--- << 6. WINDOW CREATION (Exact FluentPro Example Format) >>
-
-local Window = Fluent:CreateWindow({
-    Title = "GoonWares",
-    SubTitle = "Made by: StyearX",
-    TabWidth = isMobile and 130 or 150,
-    Tags = {
-        { Text = " Testing Ui ", Color = Color3.fromRGB(211, 15, 40) },
-        { Text = "UI base", Color = Color3.fromRGB(180, 10, 20) },
+-- ============================================================
+-- MINIMIZER
+-- ============================================================
+local Minimizer = Fluent:CreateMinimizer({
+    Icon = "rbxassetid://109639117875913",
+    Size = UDim2.fromOffset(64, 64),
+    Position = UDim2.new(0.101969875, 0, 0.110441767, 0),
+    Corner = 12,
+    BackgroundTransparency = 1,
+    IconCorner = 6,
+    Transparency = 0,
+    Lockable = true,
+    LockHoldTime = 1.0,
+    Draggable = true,
+    OnClickSound = {
+        "7127123605", "137566474343039", "438666542",
+        "257001341", "257000833", "7127123554",
+        "131607746976396", "97325669841459", "109312518223078",
     },
-    Version = "Version 1.5",
-    Acrylic = true,
-    Size = isMobile and UDim2.fromOffset(480, 490) or UDim2.fromOffset(580, 560),
-    Theme = "Dark",
-    Search = true,
-    Icons = "rbxassetid://139095000385640",
-    TitleIcon = "rbxassetid://139379979502671",
-    UserInfoTop = true,
-    UserInfoTitle = "Le Goon",
-    UserInfoSubtitle = LocalPlayer.DisplayName,
-    MinimizeKey = Enum.KeyCode.RightControl,
 })
 
--- << 7. TABS CONFIGURATION >>
+Minimizer.Visible = true
 
-local Tabs = {
-    Villains = Window:AddTab({ Title = "|  Villains", Icon = "rbxassetid://7733960981" }),
-    MobsNear = Window:AddTab({ Title = "|  Mobs near player", Icon = "lucide/skull" }),
-    Weapons  = Window:AddTab({ Title = "|  Weapons", Icon = "lucide/swords" }),
-    Island   = Window:AddTab({ Title = "|  island", Icon = "rbxassetid://10709819149" }),
-    Media    = Window:AddTab({ Title = "|  Media & Code", Icon = "rbxassetid://10723415903" }),
-    Settings = Window:AddTab({ Title = "|  Settings", Icon = "rbxassetid://7734052335" }),
+local Assets = {
+    ["Dark"]          = "rbxassetid://112989097449975",
+    ["Charcoal"]      = "rbxassetid://100096489709504",
+    ["Pearl White"]   = "rbxassetid://91320093440746",
+    ["Blood Red"]     = "rbxassetid://82205615960902",
+    ["Neon Purple"]   = "rbxassetid://122136578005735",
+    ["Deep Ocean"]    = "rbxassetid://125419002163537",
+    ["Midnight Blue"] = "rbxassetid://117942410949253",
+    ["Royal Blue"]    = "rbxassetid://102100010369948",
+    ["Deep Violet"]   = "rbxassetid://78622715445158",
+    ["Rose"]          = "rbxassetid://123035916719169",
+    ["Neon Cyber"]    = "rbxassetid://121871712581976",
+    ["Arctic Frost"]  = "rbxassetid://133933491104820",
+    ["Cotton Candy"]  = "rbxassetid://128869678908856",
+    ["Cyanic"]        = "rbxassetid://78285794098636",
+    ["Amber Glow"]    = "rbxassetid://81215128277340",
+    ["Bloomings"]     = "rbxassetid://138908725318095",
+    ["Crimson"]       = "rbxassetid://73057086743861",
+    ["Gold"]          = "rbxassetid://100401168268376",
+    ["Lavender Pink"] = "rbxassetid://126095928220634",
+}
+
+local OpenShit = Instance.new("ScreenGui")
+OpenShit.Name = "OpenShit"
+OpenShit.Parent = game.CoreGui
+OpenShit.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+OpenShit.ResetOnSpawn = false
+
+local MainOpen = Instance.new("TextButton")
+MainOpen.Name = "MainOpen"
+MainOpen.Parent = OpenShit
+MainOpen.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+MainOpen.BackgroundTransparency = 1
+MainOpen.Position = UDim2.new(0.101969875, 0, 0.110441767, 0)
+MainOpen.Size = UDim2.new(0, 64, 0, 42)
+MainOpen.Text = ""
+MainOpen.Visible = true
+
+local MainOpenCorner = Instance.new("UICorner")
+MainOpenCorner.Parent = MainOpen
+
+local BackgroundImage = Instance.new("ImageLabel")
+BackgroundImage.Name = "RotatingBackground"
+BackgroundImage.Parent = MainOpen
+BackgroundImage.Size = UDim2.new(2.7, 0, 2.7, 0)
+BackgroundImage.Position = UDim2.new(0.5, 0, 0.5, 0)
+BackgroundImage.AnchorPoint = Vector2.new(0.5, 0.5)
+BackgroundImage.BackgroundTransparency = 1
+BackgroundImage.Image = ""
+BackgroundImage.SizeConstraint = Enum.SizeConstraint.RelativeXX
+BackgroundImage.ZIndex = 0
+
+local FrontImage = Instance.new("ImageLabel")
+FrontImage.Name = "StaticIcon"
+FrontImage.Parent = MainOpen
+FrontImage.Size = UDim2.new(1, 0, 1.2, 0)
+FrontImage.Position = UDim2.new(0.5, 0, 0.5, 0)
+FrontImage.AnchorPoint = Vector2.new(0.5, 0.5)
+FrontImage.BackgroundTransparency = 1
+FrontImage.Image = "rbxassetid://109639117875913"
+FrontImage.ZIndex = 1
+
+local FrontCorner = Instance.new("UICorner")
+FrontCorner.CornerRadius = UDim.new(1, 0)
+FrontCorner.Parent = FrontImage
+
+local Rotation = 0
+local Speed = 90
+local LastTime = tick()
+
+task.spawn(function()
+    while true do
+        local Now = tick()
+        local Delta = Now - LastTime
+        LastTime = Now
+        Rotation = (Rotation + Speed * Delta) % 360
+        BackgroundImage.Rotation = Rotation
+        task.wait()
+    end
+end)
+
+local function UpdateTheme(ThemeName)
+    BackgroundImage.Image = Assets[ThemeName] or ""
+end
+
+local LastTheme = nil
+task.spawn(function()
+    while true do
+        task.wait(0.1)
+        if not (Fluent and Fluent.Theme) then continue end
+        local CurrentTheme = Fluent.Theme
+        if CurrentTheme ~= LastTheme then
+            LastTheme = CurrentTheme
+            UpdateTheme(CurrentTheme)
+        end
+    end
+end)
+
+local function MakeDraggable(TopbarObject, Object, Locked)
+    local Dragging = false
+    local DragInput, DragStart, StartPosition
+    local Holding = false
+    local HoldTime = 1.0
+    local MoveCancelThreshold = 6
+    local HoldToken = 0
+
+    Object:SetAttribute("Locked", Locked or false)
+
+    local function Update(Input)
+        if Object:GetAttribute("Locked") then return end
+        local Delta = Input.Position - DragStart
+        Object.Position = UDim2.new(
+            StartPosition.X.Scale,
+            StartPosition.X.Offset + Delta.X,
+            StartPosition.Y.Scale,
+            StartPosition.Y.Offset + Delta.Y
+        )
+    end
+
+    local function ToggleLock()
+        local NewState = not Object:GetAttribute("Locked")
+        Object:SetAttribute("Locked", NewState)
+        if Fluent then
+            Fluent:Notify({
+                Title = NewState and "Button Locked" or "Button Unlocked",
+                Content = NewState and "This button is now locked in place." or "This button can now be moved.",
+                Duration = 2
+            })
+        end
+    end
+
+    TopbarObject.InputBegan:Connect(function(Input)
+        if Input.UserInputType ~= Enum.UserInputType.MouseButton1 and Input.UserInputType ~= Enum.UserInputType.Touch then return end
+        Dragging = not Object:GetAttribute("Locked")
+        Holding = true
+        DragStart = Input.Position
+        StartPosition = Object.Position
+        HoldToken += 1
+        local Token = HoldToken
+        task.delay(HoldTime, function()
+            if Holding and Token == HoldToken then ToggleLock() end
+        end)
+        Input.Changed:Connect(function()
+            if Input.UserInputState == Enum.UserInputState.End then
+                Dragging = false
+                Holding = false
+            end
+        end)
+    end)
+
+    TopbarObject.InputChanged:Connect(function(Input)
+        if not DragStart then return end
+        if Input.UserInputType == Enum.UserInputType.MouseMovement or Input.UserInputType == Enum.UserInputType.Touch then
+            if (Input.Position - DragStart).Magnitude > MoveCancelThreshold then Holding = false end
+            DragInput = Input
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(Input)
+        if Input == DragInput and Dragging then Update(Input) end
+    end)
+end
+
+MakeDraggable(MainOpen, MainOpen, false)
+
+local function PlaySound(SoundId)
+    local Sound = Instance.new("Sound")
+    Sound.SoundId = "rbxassetid://" .. SoundId
+    Sound.Parent = game:GetService("SoundService")
+    Sound:Play()
+    Sound.Ended:Connect(function() Sound:Destroy() end)
+end
+
+MainOpen.MouseButton1Click:Connect(function()
+    local Sounds = { "7127123605", "137566474343039", "438666542", "257001341", "257000833", "7127123554", "131607746976396", "97325669841459", "109312518223078" }
+    PlaySound(Sounds[math.random(#Sounds)])
+    if Window then Window:Minimize() end
+    local function SmoothSpeed(Target, Duration)
+        local Start = Speed
+        local Steps = 30
+        for I = 1, Steps do
+            Speed = Start + (Target - Start) * (I / Steps)
+            task.wait(Duration / Steps)
+        end
+        Speed = Target
+    end
+    SmoothSpeed(360, 0.4)
+    task.wait(0.5)
+    SmoothSpeed(180, 0.4)
+    task.wait(0.3)
+    SmoothSpeed(90, 0.4)
+end)
+
+-- ============================================================
+-- CUSTOM THEMES
+-- ============================================================
+Fluent:AddTheme({
+    Name = "Dark Violet",
+    Accent = "#7850c8",
+    AcrylicMain = "#141414",
+    AcrylicBorder = "#0f0f0f",
+    AcrylicGradient = ColorSequence.new(Color3.fromHex("#191919"), Color3.fromHex("#0a0a0a")),
+    AcrylicNoise = 0.9,
+    TitleBarLine = "#6433b4",
+    Tab = "#8256d2",
+    Element = "#6e46be",
+    ElementBorder = "#5a32aa",
+    InElementBorder = "#8c64dc",
+    ElementTransparency = 0.9,
+    ElementBorderThickness = 0.5,
+    ToggleSlider = "#6433b4",
+    ToggleToggled = "#966ee6",
+    SliderRail = "#502890",
+    CheckboxUnchecked = "#5a32aa",
+    CheckboxChecked = "#8c64dc",
+    CheckboxCheck = "#c8aaff",
+    ProgressBarRail = "#461e96",
+    ProgressBarFill = "#a078f0",
+    DropdownFrame = "#6433b4",
+    DropdownHolder = "#6e46be",
+    DropdownBorder = "#502890",
+    DropdownOption = "#7850c8",
+    DropdownBorderThickness = 0.5,
+    Keybind = "#8256d2",
+    Input = "#6433b4",
+    InputFocused = "#966ee6",
+    InputIndicator = "#aa82fa",
+    Dialog = "#6e46be",
+    DialogHolder = "#8256d2",
+    DialogHolderLine = "#5a32aa",
+    DialogButton = "#8c64dc",
+    DialogButtonBorder = "#502890",
+    DialogBorder = "#7850c8",
+    DialogInput = "#6433b4",
+    DialogInputLine = "#966ee6",
+    Text = "#dcc8ff",
+    SubText = "#b4a0dc",
+    Hover = "#a078f0",
+    HoverChange = 0.5,
+    Background = "https://raw.githubusercontent.com/StyearX/Assets/main/Test.png",
+    BackgroundTransparency = 0,
+    ViewportBackground = Color3.fromHex("#281450"),
+    ViewportBackgroundImages = false,
+    DropdownOutsideWindowBackground = Color3.fromHex("#1e0f3c"),
+    DropdownOutsideWindowBackgroundImages = false,
+    ShineEnabled = true,
+    Shine = {
+        Speed = 2.5,
+        RotationSpeed = 1.0,
+        ColorSequence = ColorSequence.new({
+            ColorSequenceKeypoint.new(0,   Color3.fromHex("#1e1e1e")),
+            ColorSequenceKeypoint.new(0.5, Color3.fromHex("#503296")),
+            ColorSequenceKeypoint.new(1,   Color3.fromHex("#1e1e1e")),
+        }),
+    },
+    StrokeShine = true,
+    StrokeDark = Color3.fromHex("#3c1e78"),
+    ButtonGradient = {
+        Background = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, Color3.fromHex("#191919")),
+            ColorSequenceKeypoint.new(1, Color3.fromHex("#503296")),
+        }),
+        Stroke = ColorSequence.new({
+            ColorSequenceKeypoint.new(0,   Color3.fromHex("#0f0f0f")),
+            ColorSequenceKeypoint.new(0.5, Color3.fromHex("#3c1e78")),
+            ColorSequenceKeypoint.new(1,   Color3.fromHex("#0f0f0f")),
+        }),
+    },
+    DiscordJoinButton = "#7850c8",
+    WarningNotifyColor = "#b478ff",
+    SuccessNotifyColor = "#a0c8ff",
+    ErrorNotifyColor = "#c864c8",
+    InfoNotifyColor = "#8c64dc",
+})
+
+Fluent:AddTheme({
+    Name = "Monochrome Noir",
+    Accent = "#b4b4c3",
+    AcrylicMain = "#0c0c0e",
+    AcrylicBorder = "#28282d",
+    AcrylicGradient = ColorSequence.new({
+        ColorSequenceKeypoint.new(0,    Color3.fromHex("#0a0a0c")),
+        ColorSequenceKeypoint.new(0.33, Color3.fromHex("#121216")),
+        ColorSequenceKeypoint.new(0.66, Color3.fromHex("#16161c")),
+        ColorSequenceKeypoint.new(1,    Color3.fromHex("#19191e")),
+    }),
+    AcrylicNoise = 0.9,
+    TitleBarLine = "#50505f",
+    Tab = "#141417",
+    Element = "#121215",
+    ElementBorder = "#323237",
+    InElementBorder = "#232328",
+    ElementTransparency = 0.92,
+    ElementBorderThickness = 1,
+    ToggleSlider = "#37373c",
+    ToggleToggled = "#c8c8d7",
+    SliderRail = "#2d2d32",
+    CheckboxUnchecked = "#28282d",
+    CheckboxChecked = "#c8c8d7",
+    CheckboxCheck = "#0f0f12",
+    ProgressBarRail = "#232328",
+    ProgressBarFill = "#c8c8d7",
+    DropdownFrame = "#0f0f12",
+    DropdownHolder = "#141418",
+    DropdownBorder = "#323237",
+    DropdownOption = "#19191d",
+    DropdownBorderThickness = 1,
+    Keybind = "#1e1e22",
+    Input = "#141418",
+    InputFocused = "#1e1e23",
+    InputIndicator = "#b4b4c3",
+    Dialog = "#0e0e11",
+    DialogHolder = "#141418",
+    DialogHolderLine = "#323237",
+    DialogButton = "#32323a",
+    DialogButtonBorder = "#4b4b55",
+    DialogBorder = "#2d2d32",
+    DialogInput = "#16161a",
+    DialogInputLine = "#a0a0af",
+    Text = "#ebebf0",
+    SubText = "#8c8c94",
+    Hover = "#232328",
+    HoverChange = 0.06,
+    Background = "https://raw.githubusercontent.com/StyearX/Assets/main/backgrounds.png",
+    BackgroundTransparency = 0,
+    ShineEnabled = true,
+    Shine = {
+        Speed = 3,
+        RotationSpeed = 1.5,
+        ColorSequence = ColorSequence.new({
+            ColorSequenceKeypoint.new(0,   Color3.fromHex("#000000")),
+            ColorSequenceKeypoint.new(0.5, Color3.fromHex("#c8c8d7")),
+            ColorSequenceKeypoint.new(1,   Color3.fromHex("#000000")),
+        }),
+    },
+    StrokeShine = true,
+    StrokeDark = Color3.fromHex("#19191e"),
+    ButtonGradient = {
+        Background = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, Color3.fromHex("#2d2d34")),
+            ColorSequenceKeypoint.new(1, Color3.fromHex("#19191e")),
+        }),
+        Stroke = ColorSequence.new({
+            ColorSequenceKeypoint.new(0,   Color3.fromHex("#646473")),
+            ColorSequenceKeypoint.new(0.5, Color3.fromHex("#41414b")),
+            ColorSequenceKeypoint.new(1,   Color3.fromHex("#646473")),
+        }),
+    },
+    DiscordJoinButton = "#5865f2",
+    WarningNotifyColor = "#c8a028",
+    SuccessNotifyColor = "#3cb45a",
+    ErrorNotifyColor = "#c83232",
+    InfoNotifyColor = "#5096dc",
+})
+
+-- ============================================================
+-- WINDOW CREATION
+-- ============================================================
+Window = Fluent:CreateWindow({
+    Title = "GoonWares",
+    TabWidth = isMobile and 130 or 150,
+    SubTitle = "Made by: StyearX",
+    Acrylic = true,
+    Size = isMobile and UDim2.fromOffset(640, 640) or UDim2.fromOffset(680, 680),
+    Theme = "Basically Pink",
+    Background = true,
+    Tags = {
+        { Text = ExecutorName, Color = Color3.fromRGB(255, 100, 180) },
+        { Text = "Hello " .. tostring(LocalPlayer.DisplayName), Color = Color3.fromRGB(0, 0, 0) },
+    },
+    Font = "GothamSSm",
+    TitleIcon = "rbxassetid://77838416429094",
+    Search = {
+        Search = true,
+        Highlight = true,
+        HighlightColor = Color3.fromRGB(180, 10, 20),
+    },
+    UserInfo = {
+        UserInfo = true,
+        UserInfoTitle = LocalPlayer.Name,
+        UserInfoSubtitle = LocalPlayer.DisplayName,
+        UserInfoColor = Color3.fromRGB(180, 10, 20),
+    },
+    Anonymous = {
+        Default = false,
+        ShowAno = true,
+        AnoUserInfoTitle = "Hide For You",
+        AnoUserInfoSubTitle = "Holy moly",
+        Icons = "rbxassetid://77838416429094",
+    },
+    FolderName = "GoonWares",
+    ScreenGuiName = "GoonWares",
+})
+
+-- ============================================================
+-- TABS DEFINITION (Updated to requested names)
+-- ============================================================
+Tabs = {
+    Divider1   = Window:AddDividerTabs(),
+    Villains   = Window:AddTab({ Title = "Villains", Icon = "swords" }),
+    Divider2   = Window:AddDividerTabs(),
+    MobsNear   = Window:AddTab({ Title = "Mobs near player", Icon = "skull" }),
+    Divider3   = Window:AddDividerTabs(),
+    Weapons    = Window:AddTab({ Title = "Weapons", Icon = "shield" }),
+    Divider4   = Window:AddDividerTabs(),
+    Island     = Window:AddTab({ Title = "island", Icon = "map-pin" }),
+    Divider5   = Window:AddDividerTabs(),
+    AudioCode  = Window:AddTab({ Title = "Audio & Code", Icon = "music" }),
+    Divider6   = Window:AddDividerTabs(),
+    Settings   = Window:AddTabsInHeader({ Title = " Configuration", Icon = "settings" }),
 }
 
 local Options = Fluent.Options
+Fluent.NotifyInsideWindow = true
 
--- ====================================================================
+-- ============================================================
 -- TAB 1: VILLAINS
--- ====================================================================
+-- ============================================================
 do
-    local sec = Tabs.Villains:AddSection("Villains Management", "solar/layers-bold")
+    local sec = Tabs.Villains:AddSection("Villains", "solar/layers-bold")
 
     sec:AddParagraph({
-        Title = "Villains Scanner",
-        Content = "Scans <b>workspace.MobSpawnGroup</b> for spawns containing a <b>ChestRef</b> in their Spawn area.",
+        Title = "Villains with ChestRef",
+        Content = "Scans <b>workspace.MobSpawnGroup</b>. Only lists folders that contain a <b>ChestRef</b> inside their Spawn area.",
     })
 
     local villainDropdown = sec:AddDropdown("VillainDropdown", {
-        Title = "Select Villains",
+        Title = "Villains List",
         Values = scanVillains(),
         Default = {},
         Multi = true,
-        Description = "Choose target spawns",
+        Description = "Choose one or more spawns",
         Callback = function(val)
             State.VillainsSelected = type(val) == "table" and val or {}
         end,
@@ -308,24 +732,19 @@ do
     sec:AddButton({
         Title = "Refresh Villains",
         Icon = "lucide/refresh-cw",
-        Description = "Update list from workspace.MobSpawnGroup",
+        Description = "Re-scan workspace.MobSpawnGroup",
         Callback = function()
             local updated = scanVillains()
-            refreshDropdown(villainDropdown, updated)
-            Fluent:Notify({
-                Title = "Scanner",
-                Content = "Refreshed villain spawns (" .. #updated .. " found)",
-                Type = "Info",
-                Duration = 2,
-            })
+            updateDropdown(villainDropdown, updated)
+            Notify("Villains Refreshed", "Found " .. #updated .. " valid spawns.", "Info", nil, 2.5)
         end,
     })
 
     sec:AddSlider("VillainDistance", {
         Title = "Hover Distance",
-        Description = "Distance above the villain / chest",
+        Description = "Adjust distance between you and the mob/chest",
         Min = 2,
-        Max = 25,
+        Max = 30,
         Default = State.VillainsDistance,
         Rounding = 0,
         Callback = function(val)
@@ -335,7 +754,7 @@ do
 
     sec:AddToggle("VillainToggle", {
         Title = "Hover Above Villain / Chest",
-        Description = "Lie down on top of the mob or chest facing it",
+        Description = "Lie on top facing the target",
         Default = false,
         Callback = function(state)
             State.VillainsActive = state
@@ -347,15 +766,15 @@ do
     })
 end
 
--- ====================================================================
+-- ============================================================
 -- TAB 2: MOBS NEAR PLAYER
--- ====================================================================
+-- ============================================================
 do
-    local sec = Tabs.MobsNear:AddSection("Near Mobs Management", "lucide/radar")
+    local sec = Tabs.MobsNear:AddSection("Mobs near player", "lucide/radar")
 
     sec:AddParagraph({
-        Title = "Mob Scanner",
-        Content = "Scans <b>workspace.Mob</b>. Duplicates are filtered out so each mob type only appears once.",
+        Title = "Deduplicated Mob Scanner",
+        Content = "Scans <b>workspace.Mob</b>. Each mob species only appears once.",
     })
 
     local mobsDropdown = sec:AddDropdown("MobsNearDropdown", {
@@ -363,7 +782,7 @@ do
         Values = scanMobsNear(),
         Default = {},
         Multi = true,
-        Description = "Select target mobs",
+        Description = "Choose one or more mob species",
         Callback = function(val)
             State.MobsSelected = type(val) == "table" and val or {}
         end,
@@ -372,24 +791,19 @@ do
     sec:AddButton({
         Title = "Refresh Mobs",
         Icon = "lucide/refresh-cw",
-        Description = "Update list from workspace.Mob",
+        Description = "Re-scan workspace.Mob for unique models",
         Callback = function()
             local updated = scanMobsNear()
-            refreshDropdown(mobsDropdown, updated)
-            Fluent:Notify({
-                Title = "Scanner",
-                Content = "Refreshed mobs (" .. #updated .. " unique types found)",
-                Type = "Info",
-                Duration = 2,
-            })
+            updateDropdown(mobsDropdown, updated)
+            Notify("Mobs Refreshed", "Indexed " .. #updated .. " unique types.", "Info", nil, 2.5)
         end,
     })
 
     sec:AddSlider("MobDistance", {
         Title = "Hover Distance",
-        Description = "Distance above the target mob",
+        Description = "Adjust distance between you and the mob",
         Min = 2,
-        Max = 25,
+        Max = 30,
         Default = State.MobsDistance,
         Rounding = 0,
         Callback = function(val)
@@ -399,7 +813,7 @@ do
 
     sec:AddToggle("MobToggle", {
         Title = "Hover Above Mob",
-        Description = "Lie down on top of the selected mob facing it",
+        Description = "Lie on top facing the mob",
         Default = false,
         Callback = function(state)
             State.MobsActive = state
@@ -411,11 +825,11 @@ do
     })
 end
 
--- ====================================================================
+-- ============================================================
 -- TAB 3: WEAPONS
--- ====================================================================
+-- ============================================================
 do
-    local sec = Tabs.Weapons:AddSection("Weapon NPCs", "lucide/shield")
+    local sec = Tabs.Weapons:AddSection("Weapons", "lucide/shield")
 
     local weaponList = scanWeapons()
     State.SelectedWeapon = weaponList[1] or ""
@@ -425,7 +839,7 @@ do
         Values = weaponList,
         Default = State.SelectedWeapon,
         Multi = false,
-        Description = "Choose a weapon from workspace.NpcWeapon",
+        Description = "Choose a weapon NPC from workspace.NpcWeapon",
         Callback = function(val)
             State.SelectedWeapon = val
         end,
@@ -437,13 +851,8 @@ do
         Description = "Re-scan workspace.NpcWeapon",
         Callback = function()
             local updated = scanWeapons()
-            refreshDropdown(weaponDropdown, updated)
-            Fluent:Notify({
-                Title = "Scanner",
-                Content = "Refreshed weapons (" .. #updated .. " found)",
-                Type = "Info",
-                Duration = 2,
-            })
+            updateDropdown(weaponDropdown, updated)
+            Notify("Weapons Refreshed", "Found " .. #updated .. " weapon NPC(s).", "Info", nil, 2.5)
         end,
     })
 
@@ -453,7 +862,7 @@ do
         Description = "Instantly travel to the chosen weapon NPC",
         Callback = function()
             if not State.SelectedWeapon or State.SelectedWeapon == "No Weapons Found" then
-                Fluent:Notify({ Title = "Error", Content = "No valid weapon NPC selected.", Type = "Error", Duration = 2.5 })
+                Notify("Teleport Error", "No valid weapon NPC selected.", "Error", nil, 3)
                 return
             end
 
@@ -464,19 +873,19 @@ do
 
             if hrp and cf then
                 hrp.CFrame = cf + Vector3.new(0, 3, 0)
-                Fluent:Notify({ Title = "Teleported", Content = "Arrived at " .. State.SelectedWeapon, Type = "Success", Duration = 2.5 })
+                Notify("Teleported", "Arrived at " .. State.SelectedWeapon, "Success", nil, 2.5)
             else
-                Fluent:Notify({ Title = "Failed", Content = "Could not find destination target.", Type = "Error", Duration = 2.5 })
+                Notify("Teleport Failed", "Could not locate destination.", "Error", nil, 3)
             end
         end,
     })
 end
 
--- ====================================================================
+-- ============================================================
 -- TAB 4: ISLAND
--- ====================================================================
+-- ============================================================
 do
-    local sec = Tabs.Island:AddSection("Island Destinations", "lucide/map")
+    local sec = Tabs.Island:AddSection("island", "lucide/map")
 
     local islandList = scanIslands()
     State.SelectedIsland = islandList[1] or ""
@@ -498,23 +907,18 @@ do
         Description = "Re-scan workspace.island",
         Callback = function()
             local updated = scanIslands()
-            refreshDropdown(islandDropdown, updated)
-            Fluent:Notify({
-                Title = "Scanner",
-                Content = "Refreshed islands (" .. #updated .. " found)",
-                Type = "Info",
-                Duration = 2,
-            })
+            updateDropdown(islandDropdown, updated)
+            Notify("Islands Refreshed", "Found " .. #updated .. " islands.", "Info", nil, 2.5)
         end,
     })
 
     sec:AddButton({
-        Title = "Teleport to Selected Island",
+        Title = "Teleport to Island",
         Icon = "lucide/navigation",
-        Description = "Instantly travel to the selected island",
+        Description = "Instantly travel to the chosen island",
         Callback = function()
             if not State.SelectedIsland or State.SelectedIsland == "No Islands Found" then
-                Fluent:Notify({ Title = "Error", Content = "No valid island selected.", Type = "Error", Duration = 2.5 })
+                Notify("Teleport Error", "No valid island selected.", "Error", nil, 3)
                 return
             end
 
@@ -525,19 +929,19 @@ do
 
             if hrp and cf then
                 hrp.CFrame = cf + Vector3.new(0, 5, 0)
-                Fluent:Notify({ Title = "Teleported", Content = "Arrived at " .. State.SelectedIsland, Type = "Success", Duration = 2.5 })
+                Notify("Teleported", "Arrived at " .. State.SelectedIsland, "Success", nil, 2.5)
             else
-                Fluent:Notify({ Title = "Failed", Content = "Could not locate island model.", Type = "Error", Duration = 2.5 })
+                Notify("Teleport Failed", "Could not locate island instance.", "Error", nil, 3)
             end
         end,
     })
 end
 
--- ====================================================================
--- TAB 5: AUDIO & CODE (Exact Component Showcase from Documentation)
--- ====================================================================
+-- ============================================================
+-- TAB 5: AUDIO & CODE (Exact Documentation Showcase)
+-- ============================================================
 do
-    local secAudio = Tabs.Media:AddSection("Audio", "lucide/volume-2")
+    local secAudio = Tabs.AudioCode:AddSection("Audio", "lucide/volume-2")
 
     secAudio:AddAudio({
         Audio = "rbxassetid://1837849285",
@@ -549,7 +953,7 @@ do
         PlayOutsideWindow = true,
     })
 
-    local secRich = Tabs.Media:AddSection("Rich Text", "solar/text-bold")
+    local secRich = Tabs.AudioCode:AddSection("Rich Text & Code", "solar/text-bold")
 
     secRich:AddParagraph({
         Title = "Rich Text Is On By Default",
@@ -565,40 +969,535 @@ do
         Title = "Example",
         Code = 'sec:AddParagraph({\n    Title = "<b>Loot Drop</b>",\n    Content = "You found a <font color=\\"rgb(255,200,90)\\">Legendary</font> item!",\n})',
         OnCopy = function()
-            Fluent:Notify({
-                Title = "Clipboard",
-                Content = "Example snippet copied to clipboard.",
-                Type = "Success",
-                Duration = 2,
-            })
+            Notify("Copied", "Code snippet copied to clipboard.", "Success", nil, 2)
         end,
     })
 end
 
--- ====================================================================
--- TAB 6: SETTINGS (InterfaceManager & SaveManager Integration)
--- ====================================================================
-do
-    SaveManager:SetLibrary(Fluent)
-    InterfaceManager:SetLibrary(Fluent)
+-- ============================================================
+-- FPS COUNTER (Inside Settings)
+-- ============================================================
+FpsData = {
+    GUI = nil,
+    Connection = nil,
+    AnimatedConnections = {},
+    ShineCheckConnection = nil,
+    Enabled = true
+}
 
-    SaveManager:IgnoreThemeSettings()
-    SaveManager:SetIgnoreIndexes({})
+local FpsStartTime = tick()
 
-    InterfaceManager:SetFolder("FluentScriptHub")
-    SaveManager:SetFolder("FluentScriptHub/universal")
+local function MakeDraggableFps(TopbarObject, Object, Locked, Fluent)
+    local Dragging, DragInput, DragStart, StartPosition = false, nil, nil, nil
+    local Holding, HoldTime, MoveCancelThreshold, HoldToken = false, 1.0, 6, 0
+    Object:SetAttribute("Locked", Locked or false)
 
-    InterfaceManager:BuildInterfaceSection(Tabs.Settings)
-    SaveManager:BuildConfigSection(Tabs.Settings)
+    local function Update(Input)
+        if Object:GetAttribute("Locked") then return end
+        local Delta = Input.Position - DragStart
+        Object.Position = UDim2.new(StartPosition.X.Scale, StartPosition.X.Offset + Delta.X, StartPosition.Y.Scale, StartPosition.Y.Offset + Delta.Y)
+    end
+
+    local function ToggleLock()
+        local NewState = not Object:GetAttribute("Locked")
+        Object:SetAttribute("Locked", NewState)
+        if Fluent and Fluent.Notify then
+            Fluent:Notify({
+                Title = NewState and "Button Locked" or "Button Unlocked",
+                Content = NewState and "Locked in place." or "Can now be moved.",
+                Duration = 2,
+            })
+        end
+    end
+
+    TopbarObject.InputBegan:Connect(function(Input)
+        if Input.UserInputType ~= Enum.UserInputType.MouseButton1 and Input.UserInputType ~= Enum.UserInputType.Touch then return end
+        Dragging = not Object:GetAttribute("Locked")
+        Holding = true
+        DragStart = Input.Position
+        StartPosition = Object.Position
+        HoldToken += 1
+        local Token = HoldToken
+        task.delay(HoldTime, function()
+            if Holding and Token == HoldToken then ToggleLock() end
+        end)
+        Input.Changed:Connect(function()
+            if Input.UserInputState == Enum.UserInputState.End then
+                Dragging = false
+                Holding = false
+            end
+        end)
+    end)
+
+    TopbarObject.InputChanged:Connect(function(Input)
+        if not DragStart then return end
+        if Input.UserInputType == Enum.UserInputType.MouseMovement or Input.UserInputType == Enum.UserInputType.Touch then
+            if (Input.Position - DragStart).Magnitude > MoveCancelThreshold then Holding = false end
+            DragInput = Input
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(Input)
+        if Input == DragInput and Dragging then Update(Input) end
+    end)
 end
 
--- Select the first tab on launch
-Window:SelectTab(1)
+local function SetupFpsAnimations(Frame, Gradient, GradientStroke, UIStroke, BackgroundGradient, DividerFrames, DividerGradients, LabelGradients, Fluent)
+    for _, conn in ipairs(FpsData.AnimatedConnections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    FpsData.AnimatedConnections = {}
 
-Fluent:Notify({
-    Title = "GoonWares",
-    Content = "The script has been loaded successfully.",
-    Duration = 5,
+    if FpsData.ShineCheckConnection then
+        pcall(function() FpsData.ShineCheckConnection:Disconnect() end)
+        FpsData.ShineCheckConnection = nil
+    end
+
+    local t = 0
+    local lastShineState = Fluent and Fluent.ShineEnabled == true
+
+    local conn = RunService.RenderStepped:Connect(function(dt)
+        if not Frame or not Frame.Parent then
+            for _, c in ipairs(FpsData.AnimatedConnections) do
+                pcall(function() c:Disconnect() end)
+            end
+            FpsData.AnimatedConnections = {}
+            return
+        end
+
+        local Animated = Fluent and Fluent.ShineEnabled == true
+
+        if Animated ~= lastShineState then
+            lastShineState = Animated
+            t = 0
+        end
+
+        local Grad = Fluent and (Fluent:GetButtonGradient() or Fluent.ButtonGradients) or Fluent.ButtonGradients
+
+        Gradient.Color = Grad.Background
+        GradientStroke.Color = Grad.Stroke
+
+        if BackgroundGradient then
+            BackgroundGradient.Color = Grad.Background
+        end
+
+        for _, divGrad in ipairs(DividerGradients) do
+            if divGrad and divGrad.Parent then
+                divGrad.Color = Grad.Stroke
+            end
+        end
+
+        for _, labelGrad in ipairs(LabelGradients) do
+            if labelGrad and labelGrad.Parent then
+                labelGrad.Color = Grad.Stroke
+            end
+        end
+
+        if Animated then
+            t = t + dt
+
+            Gradient.Rotation = (t * 30) % 360
+            GradientStroke.Rotation = (t * 15) % 360
+
+            if BackgroundGradient then
+                BackgroundGradient.Rotation = (t * -20) % 360
+                BackgroundGradient.Offset = Vector2.new(math.sin(t * 0.3) * 0.1, math.cos(t * 0.25) * 0.1)
+            end
+
+            local Pulse = (math.sin(t * 0.5 * math.pi) + 1) / 2
+            local MainThickness = 1.25 + Pulse * 1.25
+            UIStroke.Thickness = MainThickness
+            Frame.BackgroundTransparency = 0.27 + (math.sin(t * 0.4) * 0.05)
+
+            for _, divGrad in ipairs(DividerGradients) do
+                if divGrad and divGrad.Parent then
+                    divGrad.Rotation = GradientStroke.Rotation
+                end
+            end
+
+            for _, divider in ipairs(DividerFrames) do
+                if divider and divider.Parent then
+                    divider.BackgroundTransparency = 0.1 + (1 - Pulse) * 0.4
+                end
+            end
+
+            for i, labelGrad in ipairs(LabelGradients) do
+                if labelGrad and labelGrad.Parent then
+                    labelGrad.Rotation = (t * 25 + i * 45) % 360
+                end
+            end
+        else
+            Gradient.Rotation = 0
+            GradientStroke.Rotation = 0
+
+            if BackgroundGradient then
+                BackgroundGradient.Rotation = 0
+                BackgroundGradient.Offset = Vector2.new(0, 0)
+            end
+
+            UIStroke.Thickness = 2
+            Frame.BackgroundTransparency = 0.27
+
+            for _, divGrad in ipairs(DividerGradients) do
+                if divGrad and divGrad.Parent then
+                    divGrad.Rotation = 0
+                end
+            end
+
+            for _, divider in ipairs(DividerFrames) do
+                if divider and divider.Parent then
+                    divider.BackgroundTransparency = 0
+                end
+            end
+
+            for _, labelGrad in ipairs(LabelGradients) do
+                if labelGrad and labelGrad.Parent then
+                    labelGrad.Rotation = 0
+                end
+            end
+        end
+    end)
+
+    table.insert(FpsData.AnimatedConnections, conn)
+
+    if Fluent then
+        FpsData.ShineCheckConnection = RunService.Heartbeat:Connect(function()
+            if Fluent then
+                local currentShine = Fluent.ShineEnabled == true
+                if currentShine ~= lastShineState then
+                    lastShineState = currentShine
+                    t = 0
+                end
+            end
+        end)
+    end
+end
+
+local function CreateFpsCounter()
+    if FpsData.GUI then
+        FpsData.GUI:Destroy()
+        FpsData.GUI = nil
+    end
+    for _, conn in ipairs(FpsData.AnimatedConnections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    FpsData.AnimatedConnections = {}
+    if FpsData.ShineCheckConnection then
+        pcall(function() FpsData.ShineCheckConnection:Disconnect() end)
+        FpsData.ShineCheckConnection = nil
+    end
+    if FpsData.Connection then
+        FpsData.Connection:Disconnect()
+        FpsData.Connection = nil
+    end
+
+    local FpsCounter = Instance.new("ScreenGui")
+    FpsCounter.Name = "FPSCounter"
+    FpsCounter.Parent = game.CoreGui
+    FpsCounter.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    FpsCounter.ResetOnSpawn = false
+    FpsCounter.DisplayOrder = 0
+
+    FpsData.GUI = FpsCounter
+
+    local Grad = Fluent:GetButtonGradient() or Fluent.ButtonGradients
+    local StrokeColor3 = Grad.Stroke.Keypoints[1].Value
+
+    local Frame = Instance.new("Frame")
+    Frame.Parent = FpsCounter
+    Frame.Size = UDim2.new(0, 320, 0, 45)
+    Frame.Position = UDim2.new(0, 300, 0, 10)
+    Frame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    Frame.BackgroundTransparency = 0.85
+    Frame.ZIndex = -10
+    Frame.ClipsDescendants = true
+
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(0, 12)
+    Corner.Parent = Frame
+
+    local BackgroundGradient = Instance.new("UIGradient")
+    BackgroundGradient.Color = Grad.Background
+    BackgroundGradient.Rotation = 0
+    BackgroundGradient.Parent = Frame
+
+    local Gradient = Instance.new("UIGradient")
+    Gradient.Color = Grad.Background
+    Gradient.Rotation = 0
+    Gradient.Parent = Frame
+
+    local GlassLayer = Instance.new("Frame")
+    GlassLayer.Name = "_FBGlass"
+    GlassLayer.Size = UDim2.fromScale(1, 1)
+    GlassLayer.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    GlassLayer.BackgroundTransparency = 0.88
+    GlassLayer.BorderSizePixel = 0
+    GlassLayer.ZIndex = -9
+    GlassLayer.Parent = Frame
+    local GlassCorner = Instance.new("UICorner")
+    GlassCorner.CornerRadius = UDim.new(0, 12)
+    GlassCorner.Parent = GlassLayer
+    local GlassGradient = Instance.new("UIGradient")
+    GlassGradient.Rotation = 90
+    GlassGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 255, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(180, 180, 180)),
+    })
+    GlassGradient.Parent = GlassLayer
+
+    local Noise = Instance.new("ImageLabel")
+    Noise.Name = "_FBNoise"
+    Noise.Image = "rbxassetid://9968344227"
+    Noise.ScaleType = Enum.ScaleType.Tile
+    Noise.TileSize = UDim2.new(0, 128, 0, 128)
+    Noise.Size = UDim2.fromScale(1, 1)
+    Noise.BackgroundTransparency = 1
+    Noise.ImageTransparency = 0.92
+    Noise.ZIndex = -8
+    Noise.Parent = Frame
+    local NoiseCorner = Instance.new("UICorner")
+    NoiseCorner.CornerRadius = UDim.new(0, 12)
+    NoiseCorner.Parent = Noise
+
+    local UIStroke = Instance.new("UIStroke")
+    UIStroke.Thickness = 2
+    UIStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    UIStroke.Color = Color3.new(1, 1, 1)
+    UIStroke.Parent = Frame
+
+    local GradientStroke = Instance.new("UIGradient")
+    GradientStroke.Color = Grad.Stroke
+    GradientStroke.Rotation = 0
+    GradientStroke.Parent = UIStroke
+
+    local LabelGradients = {}
+
+    local FPSLabel = Instance.new("TextLabel")
+    FPSLabel.Parent = Frame
+    FPSLabel.Size = UDim2.new(0, 90, 1, -10)
+    FPSLabel.Position = UDim2.new(0, 6, 0, 5)
+    FPSLabel.BackgroundTransparency = 1
+    FPSLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    FPSLabel.Font = Enum.Font.GothamBlack
+    FPSLabel.TextSize = 13
+    FPSLabel.TextXAlignment = Enum.TextXAlignment.Center
+    FPSLabel.TextYAlignment = Enum.TextYAlignment.Center
+    FPSLabel.Text = "FPS: 0"
+    FPSLabel.ZIndex = -7
+    FPSLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    FPSLabel.TextStrokeTransparency = 0.3
+    local FPSLabelGrad = Instance.new("UIGradient")
+    FPSLabelGrad.Color = Grad.Stroke
+    FPSLabelGrad.Rotation = 0
+    FPSLabelGrad.Parent = FPSLabel
+    table.insert(LabelGradients, FPSLabelGrad)
+
+    local PingLabel = Instance.new("TextLabel")
+    PingLabel.Parent = Frame
+    PingLabel.Size = UDim2.new(0, 90, 1, -10)
+    PingLabel.Position = UDim2.new(0, 108, 0, 5)
+    PingLabel.BackgroundTransparency = 1
+    PingLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    PingLabel.Font = Enum.Font.GothamBlack
+    PingLabel.TextSize = 13
+    PingLabel.TextXAlignment = Enum.TextXAlignment.Center
+    PingLabel.TextYAlignment = Enum.TextYAlignment.Center
+    PingLabel.Text = "Ping: 0 ms"
+    PingLabel.ZIndex = -7
+    PingLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    PingLabel.TextStrokeTransparency = 0.3
+    local PingLabelGrad = Instance.new("UIGradient")
+    PingLabelGrad.Color = Grad.Stroke
+    PingLabelGrad.Rotation = 0
+    PingLabelGrad.Parent = PingLabel
+    table.insert(LabelGradients, PingLabelGrad)
+
+    local PlaytimeLabel = Instance.new("TextLabel")
+    PlaytimeLabel.Parent = Frame
+    PlaytimeLabel.Size = UDim2.new(0, 100, 1, -10)
+    PlaytimeLabel.Position = UDim2.new(0, 214, 0, 5)
+    PlaytimeLabel.BackgroundTransparency = 1
+    PlaytimeLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    PlaytimeLabel.Font = Enum.Font.GothamBlack
+    PlaytimeLabel.TextSize = 13
+    PlaytimeLabel.TextXAlignment = Enum.TextXAlignment.Center
+    PlaytimeLabel.TextYAlignment = Enum.TextYAlignment.Center
+    PlaytimeLabel.Text = "0h 0m 0s"
+    PlaytimeLabel.ZIndex = -7
+    PlaytimeLabel.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    PlaytimeLabel.TextStrokeTransparency = 0.3
+    local PlaytimeLabelGrad = Instance.new("UIGradient")
+    PlaytimeLabelGrad.Color = Grad.Stroke
+    PlaytimeLabelGrad.Rotation = 0
+    PlaytimeLabelGrad.Parent = PlaytimeLabel
+    table.insert(LabelGradients, PlaytimeLabelGrad)
+
+    local DividerFrames = {}
+    local DividerGradients = {}
+
+    local Divider1 = Instance.new("Frame")
+    Divider1.Parent = Frame
+    Divider1.Size = UDim2.new(0, 1, 0.6, 0)
+    Divider1.Position = UDim2.new(0, 97, 0.2, 0)
+    Divider1.BackgroundColor3 = StrokeColor3
+    Divider1.BackgroundTransparency = 0
+    Divider1.BorderSizePixel = 0
+    Divider1.ZIndex = -7
+
+    local DividerGradient1 = Instance.new("UIGradient")
+    DividerGradient1.Color = Grad.Stroke
+    DividerGradient1.Rotation = 0
+    DividerGradient1.Parent = Divider1
+    table.insert(DividerFrames, Divider1)
+    table.insert(DividerGradients, DividerGradient1)
+
+    local Divider2 = Instance.new("Frame")
+    Divider2.Parent = Frame
+    Divider2.Size = UDim2.new(0, 1, 0.6, 0)
+    Divider2.Position = UDim2.new(0, 199, 0.2, 0)
+    Divider2.BackgroundColor3 = StrokeColor3
+    Divider2.BackgroundTransparency = 0
+    Divider2.BorderSizePixel = 0
+    Divider2.ZIndex = -7
+
+    local DividerGradient2 = Instance.new("UIGradient")
+    DividerGradient2.Color = Grad.Stroke
+    DividerGradient2.Rotation = 0
+    DividerGradient2.Parent = Divider2
+    table.insert(DividerFrames, Divider2)
+    table.insert(DividerGradients, DividerGradient2)
+
+    SetupFpsAnimations(Frame, Gradient, GradientStroke, UIStroke, BackgroundGradient, DividerFrames, DividerGradients, LabelGradients, Fluent)
+
+    local Glow = Instance.new("ImageLabel")
+    Glow.Name = "_Glow"
+    Glow.Size = UDim2.new(1.2, 0, 1.2, 0)
+    Glow.Position = UDim2.new(0.5, 0, 0.5, 0)
+    Glow.AnchorPoint = Vector2.new(0.5, 0.5)
+    Glow.BackgroundTransparency = 1
+    Glow.Image = "rbxassetid://5028857081"
+    Glow.ImageTransparency = 0.7
+    Glow.ZIndex = -11
+    Glow.Parent = Frame
+    local GlowCorner = Instance.new("UICorner")
+    GlowCorner.CornerRadius = UDim.new(0, 12)
+    GlowCorner.Parent = Glow
+
+    MakeDraggableFps(Frame, Frame, false, Fluent)
+
+    local LastUpdateTime = tick()
+    local FrameCount = 0
+
+    FpsData.Connection = RunService.RenderStepped:Connect(function()
+        FrameCount = FrameCount + 1
+        local Now = tick()
+        local Dt = Now - LastUpdateTime
+
+        if Dt >= 1 then
+            local Fps = math.round(FrameCount / Dt)
+            local Elapsed = Now - FpsStartTime
+            local H = math.floor(Elapsed / 3600)
+            local M = math.floor((Elapsed % 3600) / 60)
+            local S = math.floor(Elapsed % 60)
+
+            local Ping = 0
+            pcall(function()
+                Ping = math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue())
+            end)
+
+            FPSLabel.Text = string.format("FPS: %d", Fps)
+            PingLabel.Text = string.format("Ping: %d ms", Ping)
+            PlaytimeLabel.Text = string.format("%dh %dm %ds", H, M, S)
+
+            LastUpdateTime = Now
+            FrameCount = 0
+        end
+    end)
+
+    local function Cleanup()
+        if FpsData.Connection then
+            FpsData.Connection:Disconnect()
+            FpsData.Connection = nil
+        end
+        for _, conn in ipairs(FpsData.AnimatedConnections) do
+            pcall(function() conn:Disconnect() end)
+        end
+        FpsData.AnimatedConnections = {}
+        if FpsData.ShineCheckConnection then
+            pcall(function() FpsData.ShineCheckConnection:Disconnect() end)
+            FpsData.ShineCheckConnection = nil
+        end
+        if FpsData.GUI then
+            FpsData.GUI:Destroy()
+            FpsData.GUI = nil
+        end
+    end
+
+    return FpsCounter, Cleanup
+end
+
+local function ToggleFpsCounter(State)
+    FpsData.Enabled = State
+
+    if State then
+        if not FpsData.GUI then
+            CreateFpsCounter()
+        end
+    else
+        if FpsData.GUI then
+            if FpsData.Connection then
+                FpsData.Connection:Disconnect()
+                FpsData.Connection = nil
+            end
+            for _, conn in ipairs(FpsData.AnimatedConnections) do
+                pcall(function() conn:Disconnect() end)
+            end
+            FpsData.AnimatedConnections = {}
+            if FpsData.ShineCheckConnection then
+                pcall(function() FpsData.ShineCheckConnection:Disconnect() end)
+                FpsData.ShineCheckConnection = nil
+            end
+            FpsData.GUI:Destroy()
+            FpsData.GUI = nil
+        end
+    end
+end
+
+ToggleFpsCounter(true)
+
+local secSettingsFps = Tabs.Settings:AddSection("FPS Counter", "solar/gauge-bold")
+secSettingsFps:AddToggle("FPSCounterToggle", {
+    Title = "Show FPS Counter",
+    Description = "Toggle the FPS counter display",
+    Default = true,
+    Callback = function(Value)
+        ToggleFpsCounter(Value)
+    end
 })
 
+-- ============================================================
+-- MANAGERS (Configuration Tab)
+-- ============================================================
+MediaManager:SetFolder("GoonWares/Base")
+
+InterfaceManager:SetLibrary(Fluent)
+InterfaceManager:SetFolder("GoonWares/GameName")
+InterfaceManager:BuildInterfaceSection(Tabs.Settings)
+InterfaceManager:LoadSettings()
+
+SaveManager:SetLibrary(Fluent)
+SaveManager:SetFolder("GoonWares/GameName/Config")
+SaveManager:IgnoreThemeSettings()
+SaveManager:BuildConfigSection(Tabs.Settings)
 SaveManager:LoadAutoloadConfig()
+
+FloatingButtonManager:SetLibrary(Fluent)
+FloatingButtonManager:SetFolder("GoonWares/GameName/Floating")
+FloatingButtonManager:BuildConfigSection(Tabs.Settings)
+FloatingButtonManager:LoadAutoloadConfig()
+
+Notify("GoonWares", "loaded successfully", "Success", nil, 4)
+
+task.delay(0.5, function()
+    Window:SelectTab(1)
+end)
