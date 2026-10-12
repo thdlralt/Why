@@ -1,0 +1,551 @@
+--[[
+    FluentPro Automation Hub
+    Features:
+      - Villains Tab (MobSpawnGroup with ChestRef detection, Multi-select, Hover/Lie down, Distance Slider)
+      - Mobs Near Player Tab (workspace.Mob deduplication, Multi-select, Hover/Lie down, Distance Slider)
+      - Weapons Tab (NpcWeapon single-select teleport)
+      - Island Tab (island folder single-select teleport)
+      - Audio & Code Tab (FluentPro showcase)
+--]]
+
+-- << 1. SERVICE INITIALIZATION >>
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local isMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled and not UserInputService.KeyboardEnabled
+
+-- << 2. LOAD FLUENTPRO >>
+local success, Fluent = pcall(function()
+    return loadstring(game:HttpGet("https://github.com/StyearX/Fluent-modded/releases/download/1.5.0/main.lua", true))()
+end)
+
+if not success or not Fluent then
+    -- Fallback release path if URL varies
+    Fluent = loadstring(game:HttpGet("https://raw.githubusercontent.com/StyearX/Fluent-modded/main/main.lua", true))()
+end
+
+-- << 3. STATE & DATA STORE >>
+local State = {
+    -- Villains
+    VillainsSelected = {},
+    VillainsActive = false,
+    VillainsDistance = 6,
+
+    -- Mobs Near
+    MobsSelected = {},
+    MobsActive = false,
+    MobsDistance = 6,
+
+    -- Single-select targets
+    SelectedWeapon = nil,
+    SelectedIsland = nil,
+}
+
+-- << 4. SCANNER SERVICES >>
+
+-- Villains: Scans workspace.MobSpawnGroup. Only includes groups containing 'ChestRef' in 'Spawn'
+local function scanVillains()
+    local results = {}
+    local spawnGroup = Workspace:FindFirstChild("MobSpawnGroup")
+    if spawnGroup then
+        for _, group in ipairs(spawnGroup:GetChildren()) do
+            local spawnFolder = group:FindFirstChild("Spawn")
+            local hasChest = false
+
+            if spawnFolder and spawnFolder:FindFirstChild("ChestRef") then
+                hasChest = true
+            elseif group:FindFirstChild("ChestRef", true) then
+                hasChest = true
+            end
+
+            if hasChest then
+                table.insert(results, group.Name)
+            end
+        end
+    end
+    if #results == 0 then table.insert(results, "None Found") end
+    return results
+end
+
+-- Mobs: Scans workspace.Mob. Deduplicates names so no duplicates appear
+local function scanMobsNear()
+    local results = {}
+    local seen = {}
+    local mobFolder = Workspace:FindFirstChild("Mob") or Workspace:FindFirstChild("Mobs")
+
+    if mobFolder then
+        for _, mob in ipairs(mobFolder:GetChildren()) do
+            if mob:IsA("Model") and not seen[mob.Name] then
+                seen[mob.Name] = true
+                table.insert(results, mob.Name)
+            end
+        end
+    end
+    if #results == 0 then table.insert(results, "None Found") end
+    return results
+end
+
+-- Weapons: Scans workspace.NpcWeapon
+local function scanWeapons()
+    local results = {}
+    local weaponFolder = Workspace:FindFirstChild("NpcWeapon")
+    if weaponFolder then
+        for _, item in ipairs(weaponFolder:GetChildren()) do
+            table.insert(results, item.Name)
+        end
+    end
+    if #results == 0 then table.insert(results, "None Found") end
+    return results
+end
+
+-- Islands: Scans workspace.island
+local function scanIslands()
+    local results = {}
+    local islandFolder = Workspace:FindFirstChild("island") or Workspace:FindFirstChild("Island") or Workspace:FindFirstChild("islands")
+    if islandFolder then
+        for _, item in ipairs(islandFolder:GetChildren()) do
+            table.insert(results, item.Name)
+        end
+    end
+    if #results == 0 then table.insert(results, "None Found") end
+    return results
+end
+
+-- << 5. TARGET LOCATORS >>
+
+local function getRoot(character)
+    return character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Torso") or character:FindFirstChild("UpperTorso"))
+end
+
+local function getTargetCFrame(instance)
+    if not instance then return nil end
+    if instance:IsA("Model") then
+        local pPart = instance.PrimaryPart or instance:FindFirstChild("HumanoidRootPart") or instance:FindFirstChildWhichIsA("BasePart")
+        return pPart and pPart.CFrame or instance:GetPivot()
+    elseif instance:IsA("BasePart") then
+        return instance.CFrame
+    end
+    return nil
+end
+
+local function findActiveVillainTarget()
+    local spawnGroup = Workspace:FindFirstChild("MobSpawnGroup")
+    if not spawnGroup then return nil end
+
+    for folderName, isSelected in pairs(State.VillainsSelected) do
+        if isSelected then
+            local group = spawnGroup:FindFirstChild(folderName)
+            if group then
+                -- Check for ChestRef instance
+                local chest = group:FindFirstChild("ChestRef", true)
+                if chest then
+                    local chestTarget = chest:IsA("ObjectValue") and chest.Value or chest
+                    if chestTarget then return chestTarget end
+                end
+
+                -- If mob model exists inside the group
+                for _, child in ipairs(group:GetChildren()) do
+                    if child:IsA("Model") and child.Name ~= "Spawn" then
+                        return child
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function findActiveMobTarget()
+    local mobFolder = Workspace:FindFirstChild("Mob") or Workspace:FindFirstChild("Mobs")
+    if not mobFolder then return nil end
+
+    for _, mob in ipairs(mobFolder:GetChildren()) do
+        if mob:IsA("Model") and State.MobsSelected[mob.Name] then
+            local hum = mob:FindFirstChildOfClass("Humanoid")
+            if not hum or hum.Health > 0 then
+                return mob
+            end
+        end
+    end
+    return nil
+end
+
+-- << 6. KINEMATICS & HOVER ENGINE (Lying on top facing mob) >>
+
+-- Pitching -90 degrees on the X-axis positions the character belly-down facing the mob
+local function hoverLyingDown(hrp, targetInstance, distance)
+    local targetCF = getTargetCFrame(targetInstance)
+    if not targetCF then return end
+
+    local targetPos = targetCF.Position
+    local hoverPos = targetPos + Vector3.new(0, distance, 0)
+
+    -- Extract horizontal direction of target
+    local look = targetCF.LookVector
+    local flatLook = Vector3.new(look.X, 0, look.Z)
+    local baseRotation = if flatLook.Magnitude > 0.001 then CFrame.lookAt(Vector3.zero, flatLook) else CFrame.identity
+
+    -- CFrame.Angles(-math.pi/2, 0, 0) rotates the character horizontal (facing directly down)
+    local finalCFrame = CFrame.new(hoverPos) * baseRotation * CFrame.Angles(-math.rad(90), 0, 0)
+
+    hrp.CFrame = finalCFrame
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+end
+
+-- Heartbeat loop to keep player glued overhead
+RunService.Heartbeat:Connect(function()
+    local char = LocalPlayer.Character
+    local hrp = getRoot(char)
+    if not hrp then return end
+
+    if State.VillainsActive then
+        local target = findActiveVillainTarget()
+        if target then
+            hoverLyingDown(hrp, target, State.VillainsDistance)
+        end
+    elseif State.MobsActive then
+        local target = findActiveMobTarget()
+        if target then
+            hoverLyingDown(hrp, target, State.MobsDistance)
+        end
+    end
+end)
+
+-- << 7. FLUENTPRO WINDOW CREATION >>
+
+local Window = Fluent:CreateWindow({
+    Title = "Master Control Hub",
+    SubTitle = "Powered by FluentPro",
+    TabWidth = isMobile and 130 or 160,
+    Tags = {
+        { Text = "PRO", Color = Color3.fromRGB(220, 40, 60) },
+        { Text = "v2.0", Color = Color3.fromRGB(40, 140, 220) },
+    },
+    Version = "v2.0.4",
+    Acrylic = true,
+    Theme = "Dark",
+    Search = true,
+    Size = isMobile and UDim2.fromOffset(480, 490) or UDim2.fromOffset(600, 560),
+    MinimizeKey = Enum.KeyCode.RightControl,
+    UserInfoTop = true,
+    UserInfoTitle = LocalPlayer.DisplayName,
+    UserInfoSubtitle = "@" .. LocalPlayer.Name,
+})
+
+-- << 8. TABS DEFINITION >>
+
+local Tabs = {
+    Villains = Window:AddTab({ Title = "Villains", Icon = "rbxassetid://7733960981" }),
+    MobsNear = Window:AddTab({ Title = "Mobs Near", Icon = "lucide/skull" }),
+    Weapons  = Window:AddTab({ Title = "Weapons", Icon = "lucide/swords" }),
+    Island   = Window:AddTab({ Title = "Island", Icon = "lucide/map-pin" }),
+    Media    = Window:AddTab({ Title = "Audio & Code", Icon = "lucide/music" }),
+}
+
+-- ====================================================================
+-- TAB 1: VILLAINS
+-- ====================================================================
+do
+    local sec = Tabs.Villains:AddSection("ChestRef Villain Spawns", "solar/layers-bold")
+
+    sec:AddParagraph({
+        Title = "Villains Scanner",
+        Content = "Scans <b>workspace.MobSpawnGroup</b>. Only lists groups containing a <b>ChestRef</b> inside their Spawn folder.",
+    })
+
+    local villainDropdown = sec:AddDropdown("VillainDropdown", {
+        Title = "Select Villains / Spawns",
+        Values = scanVillains(),
+        Default = {},
+        Multi = true,
+        Description = "Choose one or more target spawns",
+        Callback = function(val)
+            State.VillainsSelected = val
+        end,
+    })
+
+    sec:AddButton({
+        Title = "Refresh Villains List",
+        Icon = "lucide/refresh-cw",
+        Description = "Re-scan workspace.MobSpawnGroup",
+        Callback = function()
+            local updated = scanVillains()
+            villainDropdown:SetValues(updated)
+            Fluent:Notify({
+                Title = "Scanner Refreshed",
+                Content = "Found " .. #updated .. " valid villain spawn(s).",
+                Type = "Info",
+                Duration = 2.5,
+            })
+        end,
+    })
+
+    sec:AddSlider("VillainHeight", {
+        Title = "Hover Distance",
+        Description = "Adjust vertical height above target",
+        Min = 2,
+        Max = 25,
+        Default = State.VillainsDistance,
+        Rounding = 1,
+        Callback = function(val)
+            State.VillainsDistance = val
+        end,
+    })
+
+    sec:AddToggle("VillainHoverToggle", {
+        Title = "Lock On Target (Hover & Face)",
+        Default = false,
+        Description = "Teleports and stays flat on top facing the target",
+        Callback = function(state)
+            State.VillainsActive = state
+            if state and State.MobsActive then
+                State.MobsActive = false
+            end
+        end,
+    })
+end
+
+-- ====================================================================
+-- TAB 2: MOBS NEAR PLAYER
+-- ====================================================================
+do
+    local sec = Tabs.MobsNear:AddSection("Unique Mobs In Area", "lucide/radar")
+
+    sec:AddParagraph({
+        Title = "Mob Scanner",
+        Content = "Scans <b>workspace.Mob</b> with duplicate prevention (shows each mob type once).",
+    })
+
+    local mobsDropdown = sec:AddDropdown("MobsDropdown", {
+        Title = "Select Target Mobs",
+        Values = scanMobsNear(),
+        Default = {},
+        Multi = true,
+        Description = "Choose one or more mob species",
+        Callback = function(val)
+            State.MobsSelected = val
+        end,
+    })
+
+    sec:AddButton({
+        Title = "Refresh Mobs List",
+        Icon = "lucide/refresh-cw",
+        Description = "Re-scan workspace.Mob for unique mobs",
+        Callback = function()
+            local updated = scanMobsNear()
+            mobsDropdown:SetValues(updated)
+            Fluent:Notify({
+                Title = "Scanner Refreshed",
+                Content = "Indexed " .. #updated .. " unique mob type(s).",
+                Type = "Info",
+                Duration = 2.5,
+            })
+        end,
+    })
+
+    sec:AddSlider("MobHeight", {
+        Title = "Hover Distance",
+        Description = "Adjust distance between you and the mob",
+        Min = 2,
+        Max = 25,
+        Default = State.MobsDistance,
+        Rounding = 1,
+        Callback = function(val)
+            State.MobsDistance = val
+        end,
+    })
+
+    sec:AddToggle("MobHoverToggle", {
+        Title = "Lock On Target (Hover & Face)",
+        Default = false,
+        Description = "Teleports and lays on top facing the mob",
+        Callback = function(state)
+            State.MobsActive = state
+            if state and State.VillainsActive then
+                State.VillainsActive = false
+            end
+        end,
+    })
+end
+
+-- ====================================================================
+-- TAB 3: WEAPONS
+-- ====================================================================
+do
+    local sec = Tabs.Weapons:AddSection("NPC Weapons", "lucide/shield")
+
+    local weaponDropdown = sec:AddDropdown("WeaponDropdown", {
+        Title = "Select Weapon NPC",
+        Values = scanWeapons(),
+        Default = scanWeapons()[1] or "",
+        Multi = false,
+        Description = "Single-select weapon destination",
+        Callback = function(val)
+            State.SelectedWeapon = val
+        end,
+    })
+
+    sec:AddButton({
+        Title = "Refresh Weapons",
+        Icon = "lucide/refresh-cw",
+        Description = "Re-scan workspace.NpcWeapon",
+        Callback = function()
+            local updated = scanWeapons()
+            weaponDropdown:SetValues(updated)
+            Fluent:Notify({
+                Title = "Refreshed",
+                Content = "Found " .. #updated .. " weapon NPC(s).",
+                Type = "Info",
+                Duration = 2.5,
+            })
+        end,
+    })
+
+    sec:AddButton({
+        Title = "Teleport to Weapon NPC",
+        Icon = "lucide/send",
+        Description = "Instantly travel to the chosen weapon NPC",
+        Callback = function()
+            if not State.SelectedWeapon or State.SelectedWeapon == "None Found" then
+                Fluent:Notify({ Title = "Error", Content = "No weapon selected!", Type = "Error", Duration = 3 })
+                return
+            end
+
+            local folder = Workspace:FindFirstChild("NpcWeapon")
+            local target = folder and folder:FindFirstChild(State.SelectedWeapon)
+            local targetCF = getTargetCFrame(target)
+            local hrp = getRoot(LocalPlayer.Character)
+
+            if hrp and targetCF then
+                hrp.CFrame = targetCF + Vector3.new(0, 3, 0)
+                Fluent:Notify({
+                    Title = "Teleported",
+                    Content = "Arrived at " .. State.SelectedWeapon,
+                    Type = "Success",
+                    Duration = 3,
+                })
+            else
+                Fluent:Notify({ Title = "Failed", Content = "Could not find destination in Workspace.", Type = "Error", Duration = 3 })
+            end
+        end,
+    })
+end
+
+-- ====================================================================
+-- TAB 4: ISLAND
+-- ====================================================================
+do
+    local sec = Tabs.Island:AddSection("Island Destinations", "lucide/navigation")
+
+    local islandDropdown = sec:AddDropdown("IslandDropdown", {
+        Title = "Select Island",
+        Values = scanIslands(),
+        Default = scanIslands()[1] or "",
+        Multi = false,
+        Description = "Single-select island location",
+        Callback = function(val)
+            State.SelectedIsland = val
+        end,
+    })
+
+    sec:AddButton({
+        Title = "Refresh Islands",
+        Icon = "lucide/refresh-cw",
+        Description = "Re-scan workspace.island",
+        Callback = function()
+            local updated = scanIslands()
+            islandDropdown:SetValues(updated)
+            Fluent:Notify({
+                Title = "Refreshed",
+                Content = "Found " .. #updated .. " island location(s).",
+                Type = "Info",
+                Duration = 2.5,
+            })
+        end,
+    })
+
+    sec:AddButton({
+        Title = "Teleport to Island",
+        Icon = "lucide/map",
+        Description = "Instantly travel to the chosen island",
+        Callback = function()
+            if not State.SelectedIsland or State.SelectedIsland == "None Found" then
+                Fluent:Notify({ Title = "Error", Content = "No island selected!", Type = "Error", Duration = 3 })
+                return
+            end
+
+            local folder = Workspace:FindFirstChild("island") or Workspace:FindFirstChild("Island") or Workspace:FindFirstChild("islands")
+            local target = folder and folder:FindFirstChild(State.SelectedIsland)
+            local targetCF = getTargetCFrame(target)
+            local hrp = getRoot(LocalPlayer.Character)
+
+            if hrp and targetCF then
+                hrp.CFrame = targetCF + Vector3.new(0, 5, 0)
+                Fluent:Notify({
+                    Title = "Teleported",
+                    Content = "Arrived at " .. State.SelectedIsland,
+                    Type = "Success",
+                    Duration = 3,
+                })
+            else
+                Fluent:Notify({ Title = "Failed", Content = "Could not locate island model.", Type = "Error", Duration = 3 })
+            end
+        end,
+    })
+end
+
+-- ====================================================================
+-- TAB 5: AUDIO & CODE (FluentPro Showcase)
+-- ====================================================================
+do
+    local secMedia = Tabs.Media:AddSection("Audio Player", "lucide/volume-2")
+
+    secMedia:AddAudio({
+        Audio = "rbxassetid://1837849285",
+        Volume = 0.6,
+        Looped = true,
+        AutoPlay = false,
+        AudioTitle = "Atmospheric Synth",
+        AudioSubtitle = "Ambient Background Audio",
+        PlayOutsideWindow = true,
+    })
+
+    local secRich = Tabs.Media:AddSection("Rich Text & Code", "solar/text-bold")
+
+    secRich:AddParagraph({
+        Title = "<b><font color=\"rgb(120,200,255)\">Rich Text</font> Support</b>",
+        Content = "FluentPro renders full <i>Roblox XML tags</i> natively inside paragraphs, titles, and descriptions.",
+    })
+
+    secRich:AddCode({
+        Title = "Kinematic Lock Function",
+        Code = [[local function hoverLyingDown(hrp, targetInstance, distance)
+    local targetCF = targetInstance:GetPivot()
+    local hoverPos = targetCF.Position + Vector3.new(0, distance, 0)
+    hrp.CFrame = CFrame.new(hoverPos) * CFrame.Angles(-math.rad(90), 0, 0)
+    hrp.AssemblyLinearVelocity = Vector3.zero
+end]],
+        OnCopy = function()
+            Fluent:Notify({
+                Title = "Copied!",
+                Content = "Source code snippet copied to clipboard.",
+                Type = "Success",
+                Duration = 2.5,
+            })
+        end,
+    })
+end
+
+-- Select first tab upon load
+Window:SelectTab(1)
+
+Fluent:Notify({
+    Title = "FluentPro Loaded",
+    Content = "All tabs, scanners, and kinematic routines ready.",
+    Type = "Success",
+    Duration = 3.5,
+})
