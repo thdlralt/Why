@@ -1,0 +1,11 @@
+It provides meta-prompting. It creates a UI using the Fluentpro Library. Fluentpro Document:
+
+
+
+In the UI, create a section called "Villains" In this section, place (or create if it doesn't already exist) a dropdown menu. This dropdown menu will contain all the items within this folder: workspace.MobSpawnGroup, and if a specific item(everyone who has an item (ChestRef) inside the "Spawn" area. ) is found within one of those folders, it will appear in the dropdown menu.   Create another section called: "Mobs near player" in this section there will be another drop-down menu and it will scan everything within this model:workspace.Mob And it will appear in the dropdown menu; if there are models with the same name, it won't show more than two. Only one. Create a section called "Weapons"; in that section, there will be another dropdown that will scan that folder:workspace.NpcWeapon And it will appear in the dropdown menu. Create another section called: "island" And there will be a dropdown that will scan this folder:workspace.island(folder).
+
+
+In all drop-downs (except for the island and weapon section drop-downs), the drop-down will be multi-item, meaning you can choose more than one.
+Below all dropdown there will be a refresh button. and a toggle button (on when activated, off when deactivated) For the mob near player and villains sections. When the button is activated in the following sections: Villains, Mobs near player, it will execute a code to teleport and remain on top of the models or the chest(in the case of the Villains section) Which the player chose. And in those sections there will be a textbox or slider or something else to increase and decrease the distance between the player and the mob. Important: the player will be lying on top of the mob, facing it.
+
+In the Island and Weapon sections, there will only be one clickable button, and when clicked, it will teleport you to the island or weapon NPC you selected.
